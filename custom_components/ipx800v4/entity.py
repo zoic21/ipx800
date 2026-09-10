@@ -1,7 +1,7 @@
 """Generic IPX800V4 entity."""
 
-from collections.abc import Iterator
-from contextlib import contextmanager
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from math import isfinite
 
 from pypx800 import (
@@ -29,6 +29,7 @@ from .const import (
     CONF_IDS,
     CONF_INVERT_VALUE,
     CONF_TRANSITION,
+    CONF_RETRY_COMMANDS,
     CONF_TYPE,
     DEFAULT_TRANSITION,
     DOMAIN,
@@ -56,11 +57,12 @@ class IpxEntity(CoordinatorEntity):
     _push_binary = False
     _push_invert = False
 
-    @contextmanager
-    def _command_error(self, operation: str) -> Iterator[None]:
+    @asynccontextmanager
+    async def _command_error(self, operation: str) -> AsyncIterator[None]:
         """Report expected write failures; keep refreshes outside this boundary."""
         try:
-            yield
+            async with self.coordinator.commands.operation(self.required_keys):
+                yield
         except Ipx800InvalidAuthError as err:
             raise HomeAssistantError(
                 f"Cannot {operation} for {self.entity_id or self.name}: "
@@ -73,6 +75,12 @@ class IpxEntity(CoordinatorEntity):
                 f"Cannot confirm {operation} for {self.entity_id or self.name}: "
                 "IPX800 communication failed. Check connectivity and device state."
             ) from err
+
+    async def _async_write(self, command, *args, retry: bool = False) -> None:
+        """Execute one write with an explicit replay policy and fixed arguments."""
+        await self.coordinator.commands.write(
+            self.required_keys, command, *args, retry=retry and self._retry_commands
+        )
 
     async def async_added_to_hass(self) -> None:
         """Register the live entity by its stable registry identity."""
@@ -125,6 +133,7 @@ class IpxEntity(CoordinatorEntity):
         """Initialize the device."""
         super().__init__(coordinator)
 
+        self._retry_commands = device_config.get(CONF_RETRY_COMMANDS, True)
         self.ipx = ipx
         self._transition = int(
             device_config.get(CONF_TRANSITION, DEFAULT_TRANSITION) * 1000
