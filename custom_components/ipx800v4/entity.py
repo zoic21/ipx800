@@ -19,7 +19,10 @@ from homeassistant.const import (
     EntityCategory,
 )
 from homeassistant.exceptions import HomeAssistantError
-from homeassistant.helpers.update_coordinator import CoordinatorEntity, DataUpdateCoordinator
+from homeassistant.helpers.update_coordinator import (
+    CoordinatorEntity,
+    DataUpdateCoordinator,
+)
 from homeassistant.util import slugify
 
 from .const import (
@@ -76,10 +79,14 @@ class IpxEntity(CoordinatorEntity):
                 "IPX800 communication failed. Check connectivity and device state."
             ) from err
 
-    async def _async_write(self, command, *args, retry: bool = False) -> None:
+    async def _async_write(self, command, *args, retry: bool = False, **kwargs) -> None:
         """Execute one write with an explicit replay policy and fixed arguments."""
         await self.coordinator.commands.write(
-            self.required_keys, command, *args, retry=retry and self._retry_commands
+            self.required_keys,
+            command,
+            *args,
+            retry=retry and self._retry_commands,
+            **kwargs,
         )
 
     async def async_added_to_hass(self) -> None:

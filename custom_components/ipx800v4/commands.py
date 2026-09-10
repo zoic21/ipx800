@@ -97,6 +97,7 @@ class CommandManager:
         command: Callable[..., Awaitable[Any]],
         *args: Any,
         retry: bool = False,
+        **kwargs: Any,
     ) -> None:
         """Retry one fixed write; release locks during asynchronous backoff."""
         for attempt in range(len(RETRY_DELAYS) + 1 if retry else 1):
@@ -108,7 +109,7 @@ class CommandManager:
                             self._locks.setdefault(key, asyncio.Lock())
                         )
                     _CURRENT_COMMAND.get()()
-                    await command(*args)
+                    await command(*args, **kwargs)
                 return
             except (Ipx800CannotConnectError, TimeoutError) as err:
                 if (

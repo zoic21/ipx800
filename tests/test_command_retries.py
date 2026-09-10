@@ -240,3 +240,25 @@ class RetryTests(unittest.IsolatedAsyncioTestCase):
                         await client.request_cgi({"SetPWM": 1})
                 response.close.assert_called_once()
                 session.get.assert_awaited_once()
+
+    async def test_keyword_only_and_mixed_arguments_survive_retries(self):
+        for args, kwargs in (
+            ((42,), {"duration": 5, "enabled": True}),
+            ((), {"value": 42, "duration": 5, "enabled": True}),
+        ):
+            with self.subTest(args=args):
+                entity, _ = make_entity(RelaySwitch)
+                received = []
+
+                async def command(value, *, duration, enabled):
+                    received.append((value, duration, enabled))
+                    if len(received) < 3:
+                        raise TimeoutError()
+
+                with patch(
+                    "custom_components.ipx800v4.commands.asyncio.sleep",
+                    new_callable=AsyncMock,
+                ):
+                    async with entity._command_error("test named arguments"):
+                        await entity._async_write(command, *args, retry=True, **kwargs)
+                self.assertEqual(received, [(42, 5, True)] * 3)
