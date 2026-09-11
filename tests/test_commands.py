@@ -168,7 +168,8 @@ class CommandTests(unittest.IsolatedAsyncioTestCase):
                     self.assertNotIn("SECRET", str(raised.exception))
                     self.assertNotIn("password", str(raised.exception))
                     retries = (
-                        error_type in (Ipx800CannotConnectError, TimeoutError)
+                        error_type
+                        in (Ipx800CannotConnectError, Ipx800RequestError, TimeoutError)
                         and cls is not CounterNumber
                         and method
                         not in (
@@ -235,10 +236,16 @@ class CommandTests(unittest.IsolatedAsyncioTestCase):
                             **{op: writer(name) for op in ("on", "off", "set_level")}
                         ),
                     )
-                with self.assertRaises(HomeAssistantError):
+                with (
+                    patch(
+                        "custom_components.ipx800v4.commands.asyncio.sleep",
+                        new_callable=AsyncMock,
+                    ),
+                    self.assertRaises(HomeAssistantError),
+                ):
                     await getattr(entity, method)(**kwargs)
                 await asyncio.sleep(0)
-                self.assertEqual(calls, names[:2])
+                self.assertEqual(calls, [names[0]] + [names[1]] * 3)
                 entity.coordinator.async_request_refresh.assert_not_awaited()
 
     async def test_color_targets_survive_updates_between_writes(self):

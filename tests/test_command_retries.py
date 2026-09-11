@@ -250,7 +250,7 @@ class RetryTests(unittest.IsolatedAsyncioTestCase):
                 entity, _ = make_entity(RelaySwitch)
                 received = []
 
-                async def command(value, *, duration, enabled):
+                async def command(value, *, duration, enabled, received=received):
                     received.append((value, duration, enabled))
                     if len(received) < 3:
                         raise TimeoutError()
@@ -262,3 +262,118 @@ class RetryTests(unittest.IsolatedAsyncioTestCase):
                     async with entity._command_error("test named arguments"):
                         await entity._async_write(command, *args, retry=True, **kwargs)
                 self.assertEqual(received, [(42, 5, True)] * 3)
+
+    async def test_response_failures_report_actual_attempts_without_secrets(self):
+        from json import JSONDecodeError
+
+        from aiohttp import ContentTypeError
+
+        for failure, cause, reason in (
+            (Ipx800RequestError(), None, "response did not confirm success"),
+            (
+                Ipx800CannotConnectError(),
+                ContentTypeError(Mock(), (), status=200, message="SECRET"),
+                "unexpected response content type",
+            ),
+            (
+                Ipx800RequestError(),
+                JSONDecodeError("SECRET", "SECRET", 0),
+                "invalid response content",
+            ),
+            (Ipx800CannotConnectError(), TimeoutError("SECRET"), "request timeout"),
+            (TimeoutError("SECRET"), None, "request timeout"),
+        ):
+            failure.__cause__ = cause
+            for enabled in (True, False):
+                entity, write = make_entity(RelaySwitch, failure)
+                entity._retry_commands = enabled
+                with (
+                    patch(
+                        "custom_components.ipx800v4.commands.asyncio.sleep",
+                        new_callable=AsyncMock,
+                    ) as sleep,
+                    self.assertRaises(HomeAssistantError) as raised,
+                ):
+                    await entity.async_turn_on()
+                message = str(raised.exception)
+                self.assertIn(reason, message)
+                self.assertIn(
+                    "attempts: 3, retries: 2" if enabled else "attempts: 1, retries: 0",
+                    message,
+                )
+                self.assertNotIn("SECRET", message)
+                self.assertEqual(write.await_count, 3 if enabled else 1)
+                self.assertEqual(
+                    sleep.await_args_list, [call(1), call(2)] if enabled else []
+                )
+
+    async def test_json_transport_retries_response_failures_but_not_http_refusal(self):
+        from json import JSONDecodeError
+
+        from aiohttp import ContentTypeError
+        from pypx800 import Relay
+
+        for status, body, error, attempts in (
+            (200, {"status": "Error"}, None, 3),
+            (200, [], None, 3),
+            (200, None, ContentTypeError(Mock(), (), status=200), 3),
+            (200, None, JSONDecodeError("invalid", "x", 0), 3),
+            (200, None, TimeoutError(), 3),
+            (401, None, None, 1),
+            (403, None, None, 1),
+            (404, None, None, 1),
+            (503, None, None, 3),
+        ):
+            with self.subTest(status=status, error=type(error).__name__):
+                response = Mock(
+                    status=status, json=AsyncMock(return_value=body, side_effect=error)
+                )
+                if status >= 400:
+                    response.raise_for_status.side_effect = ClientResponseError(
+                        Mock(), (), status=status
+                    )
+                session = Mock(get=AsyncMock(return_value=response))
+                client = IpxCommandClient(
+                    "192.0.2.1", "SECRET", session=session, request_retries=1
+                )
+                entity, _ = make_entity(RelaySwitch)
+                entity.control = Relay(client, 1)
+                with (
+                    patch(
+                        "custom_components.ipx800v4.commands.asyncio.sleep",
+                        new_callable=AsyncMock,
+                    ),
+                    self.assertRaises(HomeAssistantError) as raised,
+                ):
+                    await entity.async_turn_on()
+                self.assertEqual(session.get.await_count, attempts)
+                self.assertEqual(response.close.call_count, attempts)
+                self.assertIn(
+                    f"attempts: {attempts}, retries: {attempts - 1}",
+                    str(raised.exception),
+                )
+
+    async def test_timeout_covers_entire_json_body_without_blocking_loop(self):
+        from pypx800 import Relay
+
+        async def stalled_body():
+            await asyncio.Event().wait()
+
+        response = Mock(status=200, json=stalled_body)
+        session = Mock(get=AsyncMock(return_value=response))
+        client = IpxCommandClient(
+            "192.0.2.1",
+            "SECRET",
+            session=session,
+            request_retries=1,
+            request_timeout=0.01,
+        )
+        entity, _ = make_entity(RelaySwitch)
+        entity.control = Relay(client, 1)
+        with (
+            patch("custom_components.ipx800v4.commands.RETRY_DELAYS", (0, 0)),
+            self.assertRaisesRegex(HomeAssistantError, "request timeout.*attempts: 3"),
+        ):
+            await asyncio.wait_for(entity.async_turn_on(), 1)
+        self.assertEqual(session.get.await_count, 3)
+        self.assertEqual(response.close.call_count, 3)

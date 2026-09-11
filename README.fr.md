@@ -169,8 +169,11 @@ Les commandes d’état ou de valeur explicite réessaient les erreurs de commun
 transitoires au maximum deux fois : attente non bloquante de 1 puis 2 secondes,
 soit trois tentatives par écriture. Cela concerne ON/OFF des relais et entrées/sorties
 virtuelles, les niveaux dimmer/PWM, les canaux RGB/RGBW, les modes de chauffage
-et les valeurs analogiques virtuelles. Les erreurs d’authentification, requêtes
-refusées et erreurs HTTP définitives ne sont pas réessayées. Une lecture en échec
+et les valeurs analogiques virtuelles. Les timeouts (lecture du corps de réponse comprise), les réponses sans confirmation
+de succès et les contenus inattendus ou mal formés sont réessayés. Les erreurs
+d’authentification, URL invalides et erreurs HTTP définitives ne sont pas réessayées.
+L’erreur finale précise la cause, le type d’exception et le nombre réel de tentatives
+et de réessais pour l’écriture en échec. Une lecture en échec
 après une écriture réussie ne rejoue jamais l’écriture. L’échec final remonte
 à l’automatisation sous forme de `HomeAssistantError`.
 

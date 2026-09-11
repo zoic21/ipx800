@@ -6,9 +6,16 @@ import socket
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import AsyncExitStack, asynccontextmanager
 from contextvars import ContextVar
+from json import JSONDecodeError
 from typing import Any
 
-from aiohttp import BasicAuth, ClientError, ClientResponseError, InvalidURL
+from aiohttp import (
+    BasicAuth,
+    ClientError,
+    ClientResponseError,
+    ContentTypeError,
+    InvalidURL,
+)
 from homeassistant.exceptions import HomeAssistantError
 from pypx800 import (
     IPX800,
@@ -24,6 +31,30 @@ _CURRENT_COMMAND: ContextVar[Callable[[], None]] = ContextVar("ipx_command_check
 
 class IpxCommandClient(IPX800):
     """Avoid pypx800 2.5.1's blocking sleep even after a single CGI failure."""
+
+    async def request_api(self, params: dict) -> dict:
+        """Check HTTP status and bound the complete JSON response read."""
+        try:
+            async with asyncio.timeout(self._request_timeout):
+                response = await self._session.get(
+                    self._api_url, params={"key": self._api_key, **params}
+                )
+                try:
+                    if response.status in (401, 403):
+                        raise Ipx800InvalidAuthError("IPX800 authentication failed")
+                    response.raise_for_status()
+                    content = await response.json()
+                finally:
+                    response.close()
+            if not isinstance(content, dict):
+                raise Ipx800RequestError("IPX800 returned an unexpected JSON structure")
+            if not self._request_checkstatus or content.get("status") == "Success":
+                return content
+            raise Ipx800RequestError("IPX800 response did not confirm success")
+        except (TimeoutError, ClientError, socket.gaierror) as err:
+            raise Ipx800CannotConnectError("IPX800 communication failed") from err
+        except (JSONDecodeError, UnicodeDecodeError) as err:
+            raise Ipx800RequestError("IPX800 returned invalid JSON content") from err
 
     async def request_cgi(self, params: dict) -> str:
         """Send once; keep retries at the explicitly opted-in operation level."""
@@ -44,19 +75,64 @@ class IpxCommandClient(IPX800):
                     response.close()
             if not self._request_checkstatus or "Success" in content:
                 return content
-            raise Ipx800RequestError("IPX800 rejected the CGI request")
+            raise Ipx800RequestError("IPX800 response did not confirm success")
         except (TimeoutError, ClientError, socket.gaierror) as err:
             raise Ipx800CannotConnectError("IPX800 communication failed") from err
 
+        except UnicodeDecodeError as err:
+            raise Ipx800RequestError(
+                "IPX800 returned invalid response content"
+            ) from err
 
-def transient_error(error: Exception) -> bool:
-    """Do not replay rejected requests, invalid URLs or definitive HTTP errors."""
+
+def error_details(error: Exception) -> tuple[str, bool]:
+    """Return a secret-free reason and whether replay may recover the failure."""
     cause = error.__cause__
-    if isinstance(cause, InvalidURL):
-        return False
+    if isinstance(error, Ipx800InvalidAuthError):
+        return "authentication failed", False
+    if isinstance(error, InvalidURL) or isinstance(cause, InvalidURL):
+        return "invalid request URL", False
+    # HTTP status takes precedence, including ContentTypeError on a 4xx.
     if isinstance(cause, ClientResponseError):
-        return cause.status in (408, 429) or 500 <= cause.status < 600
-    return isinstance(error, (Ipx800CannotConnectError, TimeoutError))
+        if cause.status in (401, 403):
+            return f"authentication failed (HTTP {cause.status})", False
+        if cause.status >= 400:
+            return f"HTTP {cause.status}", cause.status in (
+                408,
+                429,
+            ) or 500 <= cause.status < 600
+        if isinstance(cause, ContentTypeError):
+            return "unexpected response content type", True
+    if isinstance(error, TimeoutError) or isinstance(cause, TimeoutError):
+        return "request timeout", True
+    if isinstance(cause, (JSONDecodeError, UnicodeDecodeError)):
+        return "invalid response content", True
+    if isinstance(error, Ipx800RequestError):
+        return "response did not confirm success", True
+    return "connection or response transfer failed", True
+
+
+class CommandFailure(Exception):
+    """Carry the failed write's real attempt count without exposing its URL."""
+
+    def __init__(self, error: Exception, attempts: int, retry_enabled: bool) -> None:
+        self.error = error
+        reason, retryable = error_details(error)
+        cause = error.__cause__
+        kind = type(error).__name__
+        if cause is not None:
+            kind += f" / {type(cause).__name__}"
+        policy = (
+            "retries disabled for this command"
+            if not retry_enabled
+            else "non-retryable error"
+            if not retryable
+            else "retry limit reached"
+        )
+        super().__init__(
+            f"IPX800 {reason} ({kind}); attempts: {attempts}, "
+            f"retries: {attempts - 1}; {policy}"
+        )
 
 
 class CommandManager:
@@ -111,13 +187,18 @@ class CommandManager:
                     _CURRENT_COMMAND.get()()
                     await command(*args, **kwargs)
                 return
-            except (Ipx800CannotConnectError, TimeoutError) as err:
+            except (
+                Ipx800CannotConnectError,
+                Ipx800RequestError,
+                Ipx800InvalidAuthError,
+                TimeoutError,
+            ) as err:
                 if (
                     not retry
                     or attempt == len(RETRY_DELAYS)
-                    or not transient_error(err)
+                    or not error_details(err)[1]
                 ):
-                    raise
+                    raise CommandFailure(err, attempt + 1, retry) from err
                 _CURRENT_COMMAND.get()()
                 _LOGGER.debug(
                     "IPX800 write failed (%s); attempt %s/%s in %ss",

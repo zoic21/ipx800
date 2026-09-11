@@ -4,12 +4,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from math import isfinite
 
-from pypx800 import (
-    IPX800,
-    Ipx800CannotConnectError,
-    Ipx800InvalidAuthError,
-    Ipx800RequestError,
-)
+from pypx800 import IPX800
 
 from homeassistant.const import (
     CONF_DEVICE_CLASS,
@@ -51,6 +46,7 @@ from .const import (
     TYPE_XTHL,
 )
 from .coordinator import IpxDataUpdateCoordinator
+from .commands import CommandFailure
 
 
 class IpxEntity(CoordinatorEntity):
@@ -66,18 +62,11 @@ class IpxEntity(CoordinatorEntity):
         try:
             async with self.coordinator.commands.operation(self.required_keys):
                 yield
-        except Ipx800InvalidAuthError as err:
-            raise HomeAssistantError(
-                f"Cannot {operation} for {self.entity_id or self.name}: "
-                "IPX800 authentication failed. Check the configured credentials."
-            ) from err
-        except (Ipx800CannotConnectError, Ipx800RequestError, TimeoutError) as err:
-            # Do not include the original message: it may contain a secret URL.
-            # A missing response does not prove that the command was not executed.
+        except CommandFailure as err:
             raise HomeAssistantError(
                 f"Cannot confirm {operation} for {self.entity_id or self.name}: "
-                "IPX800 communication failed. Check connectivity and device state."
-            ) from err
+                f"{err}. Check device state before issuing another command."
+            ) from err.error
 
     async def _async_write(self, command, *args, retry: bool = False, **kwargs) -> None:
         """Execute one write with an explicit replay policy and fixed arguments."""

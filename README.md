@@ -367,8 +367,10 @@ A successful full read reconciles all fields. A push received while a read is al
 Explicit state/value commands retry transient communication failures at most twice,
 with non-blocking waits of 1 then 2 seconds (three attempts total per write).
 This applies to relay/virtual ON/OFF, dimmer/PWM levels, RGB/RGBW channels,
-heating modes and virtual analog values. Authentication errors, rejected requests
-and definitive HTTP errors fail immediately. A failed refresh after a successful
+heating modes and virtual analog values. Timeouts (including response-body reads), missing success confirmations and
+unexpected/malformed response content are retried. Authentication errors, invalid
+URLs and definitive HTTP errors fail immediately. Final errors include the failure
+category, exception type and actual attempt/retry counts for the failed write. A failed refresh after a successful
 write never replays that write. Failed commands still raise `HomeAssistantError`.
 
 For X4VR, open/close send absolute positions 0/100, a requested position sends
